@@ -1,0 +1,10 @@
+__pycache__/
+*.log
+config.json
+config.backup.json
+config.json.tmp
+*.exe
+build/
+dist/
+*.spec
+
