@@ -22,10 +22,11 @@ SPARKLE_RATE = 0.025   # sparkles per LED per second at density 1 (keyboard ~2.7
 SPARKLE_PEAK = (0.45, 1.0)     # random peak whiteness
 # Settings sliders: lighting.sparkle_density (x SPARKLE_RATE) and lighting.sparkle_length (seconds, fade
 # randomised 0.5x-1.5x).
-# Uptime breathing: every static light breathes in its set colour, faster the longer the PC is on.
-BREATH_FULL = 3 * 24 * 3600   # top speed after 3 days, back to the slowest after any shutdown/restart
-BREATH_SLOW, BREATH_FAST = 8.0, 2.0   # seconds per breath at sign-in and at BREATH_FULL
-BREATH_FLOOR = 0.15           # brightness at the bottom of a breath
+# Uptime breathing: every static light in its set colour, solid through day 1, then breathing that gets faster and
+# deeper until it is rapid blinking at the end of day 3. Back to solid after any shutdown/restart.
+BREATH_START, BREATH_FULL = 24 * 3600, 3 * 24 * 3600
+BREATH_SLOW, BREATH_FAST = 8.0, 0.5   # seconds per breath when it starts and at BREATH_FULL
+BREATH_FLOOR = 0.03           # brightness at the bottom of a breath at full depth
 BREATH_TICKS, BREATH_TICKS_SLOW = 2, 4   # write every Nth 30 Hz tick; single-LED GPU/AIO writes are the costly ones
 
 
@@ -65,14 +66,15 @@ def uptime_seconds():
     return min(up, logon) if logon is not None else up
 
 
-def breath_period(up):
-    """Seconds per breath after `up` seconds of uptime."""
-    return BREATH_SLOW + (BREATH_FAST - BREATH_SLOW) * min(up / BREATH_FULL, 1.0)
+def breath_params(up):
+    """(seconds per breath, depth 0..1) after `up` seconds of uptime. Depth 0 = solid."""
+    frac = min(max(up - BREATH_START, 0) / (BREATH_FULL - BREATH_START), 1.0)
+    return BREATH_SLOW * (BREATH_FAST / BREATH_SLOW) ** frac, min(frac * 2, 1.0)   # speed grows evenly; depth is full by day 2
 
 
-def breath_level(phase):
-    """Brightness (BREATH_FLOOR..1) at a point 0..1 of one breath."""
-    return BREATH_FLOOR + (1 - BREATH_FLOOR) * math.sin(math.pi * phase) ** 2
+def breath_level(phase, depth):
+    """Brightness at a point 0..1 of one breath: 1 at the top, down to BREATH_FLOOR at full depth."""
+    return 1 - depth * (1 - BREATH_FLOOR) * math.cos(math.pi * phase) ** 2
 
 
 def _port_open(port):
@@ -220,14 +222,14 @@ class Lighting:
     def _sparkle_loop(self):
         active = {}  # (device id, led) -> (start time, fade, peak)
         dirty = set()
-        phase, period, tick, last, breathing = 0.0, BREATH_SLOW, 0, time.time(), False
+        phase, period, depth, tick, last, breathing = 0.0, BREATH_SLOW, 0.0, 0, time.time(), False
         while True:
             time.sleep(1 / 30)
             now = time.time()
             L = self.cfg['lighting']
-            if L.get('uptime_breath'):
-                if tick % 300 == 0:
-                    period = breath_period(uptime_seconds())
+            if tick % 300 == 0:
+                period, depth = breath_params(uptime_seconds())
+            if L.get('uptime_breath') and depth > 0:
                 phase = (phase + (now - last) / period) % 1
                 breathing = True
             elif breathing:  # switched off: repaint the base once
@@ -252,7 +254,7 @@ class Lighting:
                          if tick % (BREATH_TICKS_SLOW if len(e[1]) == 1 else BREATH_TICKS) == 0}
             if devs:
                 # a skipped frame (lock busy) is redrawn next time, so no LED is left half white
-                level = breath_level(phase) if breathing else 1.0
+                level = breath_level(phase, depth) if breathing else 1.0
                 dirty = set() if self._sparkle_frame(active, devs, now, level) else devs - {k[0] for k in active}
 
     def _sparkle_frame(self, active, devs, now=None, level=1.0):

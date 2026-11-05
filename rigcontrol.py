@@ -12,7 +12,7 @@ BASE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 if not FROZEN:
     sys.path.insert(0, BASE)
 import actions, devices, sendkeys
-from lighting import Lighting, TARGETS, EFFECTS, hex_rgb, uptime_seconds, breath_period
+from lighting import Lighting, TARGETS, EFFECTS, hex_rgb, uptime_seconds, breath_params
 
 CFG_PATH = os.path.join(BASE, 'config.json')
 BACKUP_PATH = os.path.join(BASE, 'config.backup.json')
@@ -929,7 +929,8 @@ class App:
         breath = ''
         if self.cfg['lighting'].get('uptime_breath'):
             up = uptime_seconds()
-            breath = '  ·  uptime %.1f days, %.1f s per breath' % (up / 86400, breath_period(up))
+            period, depth = breath_params(up)
+            breath = '  ·  uptime %.1f days, %s' % (up / 86400, '%.1f s per breath' % period if depth else 'solid')
         self._stat('lighting', n > 0, '%d devices' % n if n else 'Starting', 'Effect %s  ·  #%s%s' % (
             self.cfg['lighting']['effect'], self.cfg['lighting']['color'], breath))
         if cs:
@@ -962,10 +963,10 @@ class App:
         ttk.Label(c, style='CardMuted.TLabel', text='Untick if mouse clicks or scrolling ever misbehave '
                   '(also in the tray menu).').pack(anchor='w', padx=(26, 0))
         self.breath_var = tk.BooleanVar(value=self.cfg['lighting'].get('uptime_breath', False))
-        ttk.Checkbutton(c, text='Lights breathe faster the longer the PC is on', variable=self.breath_var,
+        ttk.Checkbutton(c, text='Lights go from solid to rapid blinking the longer the PC is on', variable=self.breath_var,
                         command=self.toggle_uptime_breath).pack(anchor='w', pady=(6, 0))
-        ttk.Label(c, style='CardMuted.TLabel', text='Top speed after 3 days on; back to slow after any shut down '
-                  'or restart. Static effect only.').pack(anchor='w', padx=(26, 0))
+        ttk.Label(c, style='CardMuted.TLabel', text='Solid on day 1, rapid blinking by the end of day 3; back to solid after '
+                  'any shut down or restart. Static effect only.').pack(anchor='w', padx=(26, 0))
         self.sparkle_var = tk.BooleanVar(value=self.cfg['lighting'].get('sparkle', False))
         ttk.Checkbutton(c, text='White sparkle on peripherals (and now and then in the case)', variable=self.sparkle_var,
                         command=self.toggle_sparkle).pack(anchor='w', pady=(6, 0))
