@@ -3,7 +3,7 @@
 Targets: fans (board D_LED2), heatsink (board I/O cover), board (other board zones), gpu,
 cooler (EVGA CLC via liquidctl), mouse, mouse_dpi (Scimitar LED 3), tartarus, keyboard.
 """
-import colorsys, ctypes, os, random, socket, subprocess, threading, time
+import ctypes, math, os, random, socket, subprocess, threading, time
 from openrgb import OpenRGBClient
 from openrgb.utils import RGBColor, DeviceType
 
@@ -22,7 +22,11 @@ SPARKLE_RATE = 0.025   # sparkles per LED per second at density 1 (keyboard ~2.7
 SPARKLE_PEAK = (0.45, 1.0)     # random peak whiteness
 # Settings sliders: lighting.sparkle_density (x SPARKLE_RATE) and lighting.sparkle_length (seconds, fade
 # randomised 0.5x-1.5x).
-UPTIME_FULL = 7 * 24 * 3600  # uptime tint: full red after 7 days, back to the set colour after any shutdown/restart
+# Uptime breathing: every static light breathes in its set colour, faster the longer the PC is on.
+BREATH_FULL = 3 * 24 * 3600   # top speed after 3 days, back to the slowest after any shutdown/restart
+BREATH_SLOW, BREATH_FAST = 8.0, 2.0   # seconds per breath at sign-in and at BREATH_FULL
+BREATH_FLOOR = 0.15           # brightness at the bottom of a breath
+BREATH_TICKS, BREATH_TICKS_SLOW = 2, 4   # write every Nth 30 Hz tick; single-LED GPU/AIO writes are the costly ones
 
 
 def hex_rgb(h):
@@ -61,14 +65,14 @@ def uptime_seconds():
     return min(up, logon) if logon is not None else up
 
 
-def uptime_tint(hexcol, frac):
-    """Slide the hue from the set colour to red (keeps brightness/saturation, passes through yellow/orange)."""
-    h, s, v = colorsys.rgb_to_hsv(*(c / 255 for c in hex_rgb(hexcol)))
-    if h > 0.5:  # blue/purple side: go round to red the short way
-        h = h + (1 - h) * frac
-    else:
-        h = h * (1 - frac)
-    return '%02x%02x%02x' % tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h % 1, s, v))
+def breath_period(up):
+    """Seconds per breath after `up` seconds of uptime."""
+    return BREATH_SLOW + (BREATH_FAST - BREATH_SLOW) * min(up / BREATH_FULL, 1.0)
+
+
+def breath_level(phase):
+    """Brightness (BREATH_FLOOR..1) at a point 0..1 of one breath."""
+    return BREATH_FLOOR + (1 - BREATH_FLOOR) * math.sin(math.pi * phase) ** 2
 
 
 def _port_open(port):
@@ -86,18 +90,10 @@ class Lighting:
         threading.Thread(target=self._sparkle_loop, daemon=True).start()
 
     # ---- settings ----
-    def resolve(self, target, tint=True):
-        """tint=False: the colour as set (UI); tint=True: what goes to the hardware."""
+    def resolve(self, target):
         L = self.cfg['lighting']
         o = L.get('overrides', {}).get(target) or {}
-        color = o.get('color', L['color'])
-        if tint and L.get('uptime_tint'):
-            color = uptime_tint(color, self.uptime_frac())
-        return color, o.get('effect', L['effect'])
-
-    @staticmethod
-    def uptime_frac():
-        return min(uptime_seconds() / UPTIME_FULL, 1.0)
+        return o.get('color', L['color']), o.get('effect', L['effect'])
 
     # ---- OpenRGB server ----
     def exe(self):
@@ -201,51 +197,65 @@ class Lighting:
                         leds += range(len(cols), len(cols) + len(zc))
                     cols += zc
                 if leds and len(cols) == len(d.leds):
-                    sparkle[d.id] = (d, cols, leds, SPARKLE_CASE_RATE)
+                    sparkle[d.id] = (d, cols, leds, SPARKLE_CASE_RATE, list(range(len(cols))))
             elif d.type == DeviceType.MOUSE:
                 cols = [self._rgb('mouse')] * len(d.leds)
                 if len(cols) > SCIMITAR_DPI_LED:
                     cols[SCIMITAR_DPI_LED] = self._rgb('mouse_dpi')
                 d.set_colors(cols, fast=live)
                 if effect == 'static':
-                    sparkle[d.id] = (d, cols, [i for i in SCIMITAR_VISIBLE if i < len(cols)] or list(range(len(cols))), 1)
+                    leds = [i for i in SCIMITAR_VISIBLE if i < len(cols)] or list(range(len(cols)))
+                    sparkle[d.id] = (d, cols, leds, 1, leds)
             else:
                 cols = [self._rgb(primary)] * len(d.leds)
                 d.set_colors(cols, fast=live)
                 if primary in SPARKLE_TARGETS and effect == 'static':
                     rate = SPARKLE_WHOLE if len(cols) == 1 else SPARKLE_CASE_RATE if primary in SPARKLE_CASE else 1
-                    sparkle[d.id] = (d, cols, list(range(len(cols))), rate)
+                    sparkle[d.id] = (d, cols, list(range(len(cols))), rate, list(range(len(cols))))
             if not live:
                 self.log('Lighting: %s -> %s #%s' % (d.name, effect, color))
         self.sparkle_base = sparkle
 
-    # ---- sparkle: white glints over the base colour on the peripherals ----
+    # ---- animation: uptime breathing, with white sparkle glints over it ----
     def _sparkle_loop(self):
         active = {}  # (device id, led) -> (start time, fade, peak)
         dirty = set()
+        phase, period, tick, last, breathing = 0.0, BREATH_SLOW, 0, time.time(), False
         while True:
             time.sleep(1 / 30)
             now = time.time()
             L = self.cfg['lighting']
+            if L.get('uptime_breath'):
+                if tick % 300 == 0:
+                    period = breath_period(uptime_seconds())
+                phase = (phase + (now - last) / period) % 1
+                breathing = True
+            elif breathing:  # switched off: repaint the base once
+                dirty |= set(self.sparkle_base); breathing = False
+            last, tick = now, tick + 1
             if L.get('sparkle'):
                 p = SPARKLE_RATE * L.get('sparkle_density', 1.0) / 30
                 length = L.get('sparkle_length', 0.5)
-                for dev_id, (_, _, leds, rate) in list(self.sparkle_base.items()):
+                for dev_id, (_, _, leds, rate, _) in list(self.sparkle_base.items()):
                     for i in leds:
                         if random.random() < p * rate and (dev_id, i) not in active:
                             active[(dev_id, i)] = (now + random.random() / 30, length * random.uniform(0.5, 1.5),
                                                    random.uniform(*SPARKLE_PEAK))
             elif active:  # switched off: repaint the base once
-                dirty = {k[0] for k in active}; active = {}
+                dirty |= {k[0] for k in active}; active = {}
             done = [k for k, (t, fade, _) in active.items() if now - t > fade * 1.15]
             for k in done:
                 del active[k]
             devs = {k[0] for k in active} | {k[0] for k in done} | dirty
+            if breathing:
+                devs |= {i for i, e in list(self.sparkle_base.items())
+                         if tick % (BREATH_TICKS_SLOW if len(e[1]) == 1 else BREATH_TICKS) == 0}
             if devs:
                 # a skipped frame (lock busy) is redrawn next time, so no LED is left half white
-                dirty = set() if self._sparkle_frame(active, devs, now) else devs - {k[0] for k in active}
+                level = breath_level(phase) if breathing else 1.0
+                dirty = set() if self._sparkle_frame(active, devs, now, level) else devs - {k[0] for k in active}
 
-    def _sparkle_frame(self, active, devs, now=None):
+    def _sparkle_frame(self, active, devs, now=None, level=1.0):
         if not self.lock.acquire(timeout=0.02):
             return False  # a full apply or cooler read is running
         try:
@@ -255,6 +265,10 @@ class Lighting:
                     continue
                 d, base = entry[:2]
                 cols = list(base)
+                if level < 1:
+                    for i in entry[4]:
+                        b = cols[i]
+                        cols[i] = RGBColor(round(b.red * level), round(b.green * level), round(b.blue * level))
                 for (did, i), (t, fade, peak) in active.items():
                     if did != dev_id or i >= len(cols):
                         continue
@@ -335,7 +349,7 @@ class Lighting:
                     # liquidctl's default alert is 45 C, which normal gaming load reaches: the logo then shows red
                     dev.set_color('logo', mode, colors, **self._alert(rgb))
                 if effect == 'static':
-                    self.sparkle_base['aio'] = (dev, [RGBColor(*rgb)], [0], SPARKLE_WHOLE)
+                    self.sparkle_base['aio'] = (dev, [RGBColor(*rgb)], [0], SPARKLE_WHOLE, [0])
             self.log('Lighting: CPU cooler -> %s #%s' % (effect, color) if found else 'Lighting: CPU cooler not found')
         except Exception as e:
             self.log('Lighting: CPU cooler failed: %s' % e)

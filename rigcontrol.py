@@ -12,7 +12,7 @@ BASE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 if not FROZEN:
     sys.path.insert(0, BASE)
 import actions, devices, sendkeys
-from lighting import Lighting, TARGETS, EFFECTS, hex_rgb, uptime_seconds
+from lighting import Lighting, TARGETS, EFFECTS, hex_rgb, uptime_seconds, breath_period
 
 CFG_PATH = os.path.join(BASE, 'config.json')
 BACKUP_PATH = os.path.join(BASE, 'config.backup.json')
@@ -24,7 +24,7 @@ HOTPLUG = {'Keyboard': (devices.RAZER, {0x0243})}  # Huntsman Tournament Edition
 _T = lambda a, p=4, r=0: {'action': a, 'press': p, 'release': r}
 DEFAULT_CFG = {
     'version': 2,
-    'lighting': {'color': '00ff00', 'effect': 'static', 'overrides': {}, 'uptime_tint': True, 'sparkle': True,
+    'lighting': {'color': '00ff00', 'effect': 'static', 'overrides': {}, 'uptime_breath': True, 'sparkle': True,
                  'sparkle_density': 1.0, 'sparkle_length': 0.5},
     'dpi': 1500,
     'openrgb_exe': 'OpenRGB\\OpenRGB.exe',
@@ -423,7 +423,6 @@ class App:
         self.readers = [devices.Tartarus(self.log, self.cfg['tartarus'], self.on_device, verbose),
                         devices.Scimitar(self.log, self.cfg['scimitar'], self.on_device, verbose)]
         self.wheel = None
-        self.last_tint = None
         self.live_pending, self.live_busy = None, False
         self.root = tk.Tk(); dark_theme(self.root)
         self.build_ui()
@@ -497,12 +496,11 @@ class App:
         self.apply_lighting(); self.apply_dpi()
 
     def watcher(self):
-        """Detect resume from sleep (wall clock jump), replugged lighting-only devices and uptime tint steps."""
+        """Detect resume from sleep (wall clock jump) and replugged lighting-only devices."""
         last = time.time()
         present = self.hotplug_present()
-        tick = 0
         while True:
-            time.sleep(5); tick += 1
+            time.sleep(5)
             now_present = self.hotplug_present()
             for name in now_present - present:
                 self.log('%s replugged: restarting OpenRGB and re-applying lighting' % name)
@@ -516,8 +514,6 @@ class App:
                     self.log('ERROR re-apply after %s replug: %s' % (name, e))
                 last = time.time()  # the OpenRGB restart is not a sleep/resume gap
             present = now_present
-            if tick % 12 == 0:
-                self.check_uptime_tint()
             now = time.time()
             if now - last > 30:
                 self.log('Resume from sleep detected: re-applying')
@@ -537,22 +533,9 @@ class App:
         except Exception:
             return set()
 
-    def check_uptime_tint(self):
-        """Re-apply when the uptime tint has moved the colour far enough to change the hex value."""
-        if not self.cfg['lighting'].get('uptime_tint'):
-            return
-        color = self.light.resolve('fans')[0]
-        if color != self.last_tint:
-            if self.last_tint is not None:
-                self.log('Uptime tint: %.1f days up -> #%s' % (uptime_seconds() / 86400, color))
-                self.bg(self.apply_lighting)
-            self.last_tint = color
-
-    def toggle_uptime_tint(self):
-        self.cfg['lighting']['uptime_tint'] = self.tint_var.get(); self.save()
-        self.log('Uptime tint: %s' % ('on' if self.tint_var.get() else 'off'))
-        self.last_tint = None
-        self.bg(self.apply_lighting)
+    def toggle_uptime_breath(self):
+        self.cfg['lighting']['uptime_breath'] = self.breath_var.get(); self.save()
+        self.log('Uptime breathing: %s' % ('on' if self.breath_var.get() else 'off'))
 
     def set_sparkle(self, key, value):
         self.cfg['lighting'][key] = round(float(value), 2)
@@ -709,7 +692,7 @@ class App:
             bg = CARD_HI if sel or hover else CARD
             for w in parts: w.configure(bg=bg)
             L = self.cfg['lighting']
-            color, effect = (L['color'], L['effect']) if key == 'all' else self.light.resolve(key, tint=False)
+            color, effect = (L['color'], L['effect']) if key == 'all' else self.light.resolve(key)
             own = key != 'all' and key in L['overrides']
             sw.itemconfigure(dot, fill='#000000' if effect == 'off' else '#' + color)
             info.configure(text=effect if key == 'all' else ('custom · ' + effect if own else 'follows Everything'),
@@ -728,7 +711,7 @@ class App:
 
     def load_target(self):
         t = self.cur_target(); L = self.cfg['lighting']
-        color, effect = (L['color'], L['effect']) if t == 'all' else self.light.resolve(t, tint=False)
+        color, effect = (L['color'], L['effect']) if t == 'all' else self.light.resolve(t)
         self.picker.set(color); self.swatch.configure(bg='#' + color); self.hex_var.set('#' + color)
         self._paint_effects(effect)
         for paint in self.dev_rows.values():
@@ -943,11 +926,12 @@ class App:
         self._stat('tartarus', tart.connected, 'Connected' if tart.connected else 'Not found',
                    'Driver mode, analog keys handled by RigControl' if tart.connected else 'Plug in the keypad')
         n = self.light.device_count
-        tint = ''
-        if self.cfg['lighting'].get('uptime_tint'):
-            tint = '  ·  uptime %.1f days -> #%s' % (uptime_seconds() / 86400, self.light.resolve('fans')[0])
+        breath = ''
+        if self.cfg['lighting'].get('uptime_breath'):
+            up = uptime_seconds()
+            breath = '  ·  uptime %.1f days, %.1f s per breath' % (up / 86400, breath_period(up))
         self._stat('lighting', n > 0, '%d devices' % n if n else 'Starting', 'Effect %s  ·  #%s%s' % (
-            self.cfg['lighting']['effect'], self.cfg['lighting']['color'], tint))
+            self.cfg['lighting']['effect'], self.cfg['lighting']['color'], breath))
         if cs:
             self._stat('cooler', True, '%.1f °C' % cs.get('Liquid temperature', 0),
                        'Fan %s rpm  ·  pump %s rpm' % (cs.get('Fan speed', '—'), cs.get('Pump speed', '—')))
@@ -977,11 +961,11 @@ class App:
                         command=lambda: self.set_wheel_filter(self.wheel_var.get())).pack(anchor='w', pady=(6, 0))
         ttk.Label(c, style='CardMuted.TLabel', text='Untick if mouse clicks or scrolling ever misbehave '
                   '(also in the tray menu).').pack(anchor='w', padx=(26, 0))
-        self.tint_var = tk.BooleanVar(value=self.cfg['lighting'].get('uptime_tint', False))
-        ttk.Checkbutton(c, text='Shift all lights toward red the longer the PC is on', variable=self.tint_var,
-                        command=self.toggle_uptime_tint).pack(anchor='w', pady=(6, 0))
-        ttk.Label(c, style='CardMuted.TLabel', text='Full red after 7 days on; back to your colour after any shut down '
-                  'or restart.').pack(anchor='w', padx=(26, 0))
+        self.breath_var = tk.BooleanVar(value=self.cfg['lighting'].get('uptime_breath', False))
+        ttk.Checkbutton(c, text='Lights breathe faster the longer the PC is on', variable=self.breath_var,
+                        command=self.toggle_uptime_breath).pack(anchor='w', pady=(6, 0))
+        ttk.Label(c, style='CardMuted.TLabel', text='Top speed after 3 days on; back to slow after any shut down '
+                  'or restart. Static effect only.').pack(anchor='w', padx=(26, 0))
         self.sparkle_var = tk.BooleanVar(value=self.cfg['lighting'].get('sparkle', False))
         ttk.Checkbutton(c, text='White sparkle on peripherals (and now and then in the case)', variable=self.sparkle_var,
                         command=self.toggle_sparkle).pack(anchor='w', pady=(6, 0))
