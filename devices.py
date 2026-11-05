@@ -109,7 +109,7 @@ class Tartarus(Reader):
                     tap = b.get('tap_ms', 0)
                     self.down[pos] = (b['action'], b.get('release', 0), tap)  # keep the action held even if edited
                     self.runner.press(b['action'], tap)
-                    if self.verbose: self.log('Tartarus %02d down (%d) -> %s' % (pos, v, b['action']))
+                    if self.verbose: self.log('Tartarus %02d down (%d) -> %s  %s' % (pos, v, b['action'], sendkeys.context()))
 
     def release_all(self):
         for action, _, tap in self.down.values():
@@ -169,9 +169,9 @@ class WheelFilter(threading.Thread):
                 'joy_down': 'DOWN', 'joy_downleft': 'DOWN+LEFT', 'joy_left': 'LEFT', 'joy_upleft': 'UP+LEFT',
                 'modifier': 'LALT'}
 
-    def __init__(self, log, binds, exe):
+    def __init__(self, log, binds, exe, verbose=False):
         super().__init__(daemon=True)
-        self.log, self.binds, self.exe = log, binds, exe
+        self.log, self.binds, self.exe, self.verbose = log, binds, exe, verbose
         self.runner, self.proc, self.stop_flag, self.held = Runner(log), None, threading.Event(), None
         self.arrows, self.joy_action, self.mod_action = set(), None, None
 
@@ -243,6 +243,7 @@ class WheelFilter(threading.Thread):
                 key, down = ev
                 b = self.binds.get(key, {})
                 action, tap = b.get('action', ''), b.get('tap_ms', 0)
+                if self.verbose: self.log('Tartarus %s %s -> %s  %s' % (key, {True: 'down', False: 'up', None: 'tick'}[down], action, sendkeys.context()))
                 if down is True:
                     self.held = (action, tap); self.runner.press(action, tap)
                 elif down is False:

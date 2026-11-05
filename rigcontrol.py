@@ -34,6 +34,7 @@ DEFAULT_CFG = {
     'aio': True,
     'aio_alert_temp': None,  # cooler logo red-alert temperature; None = no alert (liquidctl's own default is 45)
     'wheel_filter': True,
+    'key_log': False,  # log every button press with held modifiers and the focused window (same as --verbose)
     'scimitar': dict({'G%d' % i: {'action': 'NUM%d' % i} for i in range(1, 10)},
                      G10={'action': 'NUMDIV'}, G11={'action': 'NUMMUL'}, G12={'action': 'NUMSUB'},
                      DPI={'action': 'MOUSE5'}, PROFILE={'action': 'MOUSE4'}),  # Bike: DPI=Forward(Auto-run), profile=Back(Walk)
@@ -41,8 +42,9 @@ DEFAULT_CFG = {
                  '5': _T('F5'), '6': _T('TAB'), '7': _T('F7'), '8': _T('F8'), '9': _T('F9'), '10': _T('F10'),
                  '11': _T('LSHIFT'), '12': _T('2'), '13': _T('3'), '14': _T('4'), '15': _T('5'),
                  '16': _T('LCTRL'), '17': _T('7'), '18': _T('8'), '19': _T('9'), '20': _T('M'),
-                 # wheel click = F13 (FFXIV Jump's 2nd key): End picked up Ctrl/Alt from keys 16 / Alt (Ctrl+End etc.)
-                 'wheel_click': {'action': 'F13', 'tap_ms': 40},
+                 # wheel click = End (FFXIV Jump), held while pressed so Jump can be held to ascend when flying.
+                 # Not F13: FFXIV does not accept it.
+                 'wheel_click': {'action': 'END'},
                  'wheel_up': {'action': 'WHEELUP'}, 'wheel_down': {'action': 'WHEELDOWN'},
                  **{k: {'action': v} for k, v in devices.WheelFilter.DEFAULTS.items()}},
     'tartarus_profile': 2,   # profile indicator light: 1 red, 2 green, 3 blue
@@ -414,6 +416,7 @@ class BindDialog(tk.Toplevel):
 class App:
     def __init__(self, verbose, minimized):
         self.cfg, self.q = load_cfg(), queue.Queue()
+        self.verbose = verbose = verbose or bool(self.cfg.get('key_log'))
         self.logf = open(LOG_PATH, 'a', encoding='utf-8')
         self.light = Lighting(self.cfg, self.log, BASE)
         self.seen = set()
@@ -886,7 +889,7 @@ class App:
         if self.wheel:
             self.wheel.stop(); self.wheel = None
         if on:
-            self.wheel = devices.WheelFilter(self.log, self.cfg['tartarus'], os.path.join(BASE, 'RigInput.exe'))
+            self.wheel = devices.WheelFilter(self.log, self.cfg['tartarus'], os.path.join(BASE, 'RigInput.exe'), self.verbose)
             self.wheel.start()
         else:
             self.log('Wheel filter: off')

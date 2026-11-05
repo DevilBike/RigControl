@@ -79,6 +79,14 @@ def release_if_held(names):
     return out
 
 
+def context():
+    """For the key log: modifiers Windows reports as held, and the focused window's title."""
+    mods = [n for n in ('LCTRL', 'RCTRL', 'LSHIFT', 'RSHIFT', 'LALT', 'RALT') if user32.GetAsyncKeyState(KEYS[n][0]) & 0x8000]
+    buf = ctypes.create_unicode_buffer(80)
+    user32.GetWindowTextW(user32.GetForegroundWindow(), buf, 80)
+    return 'mods=%s focus=%r' % ('+'.join(mods) or '-', buf.value)
+
+
 def _send(inp):
     if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
         raise ctypes.WinError(ctypes.get_last_error())
